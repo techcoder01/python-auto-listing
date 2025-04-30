@@ -14,6 +14,32 @@ import json
 import logging
 import queue
 import re
+import requests
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
+cloudinary.config(
+    cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
+    api_key=os.getenv('CLOUDINARY_API_KEY'),
+    api_secret=os.getenv('CLOUDINARY_API_SECRET'),
+    secure=True
+)
+
+uploaded_cloudinary_ids = set()
+
+def upload_file_to_cloudinary(file_storage):
+    result = cloudinary.uploader.upload(
+        file_storage,
+        resource_type="raw"
+    )
+    uploaded_cloudinary_ids.add(result['public_id'])
+    return result['secure_url'], result['public_id']
+
+def download_file_from_url(url):
+    response = requests.get(url)
+    response.raise_for_status()
+    return BytesIO(response.content)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -484,7 +510,9 @@ def send_progress_update(task_id):
         
         sse_manager.send_event(task_id, 'progress', {'progress': data_copy})
 
-def background_task(filepath, task_id):
+
+
+def background_task(po_url, from_url, task_id):
     global stop_execution_flag
     
     # Register this thread
@@ -495,6 +523,13 @@ def background_task(filepath, task_id):
         }
     
     try:
+        po_file_obj = download_file_from_url(po_url)
+        from_file_obj = download_file_from_url(from_url)
+        # Now use po_file_obj and from_file_obj with pandas
+        if po_url.lower().endswith('.csv'):
+            po_df = pd.read_csv(po_file_obj)
+        else:
+            po_df = pd.read_excel(po_file_obj)
         # Check if we should stop before starting
         with stop_execution_lock:
             if stop_execution_flag:
@@ -640,6 +675,19 @@ def background_task(filepath, task_id):
             os.remove(filepath)
         except Exception as e:
             logger.error(f"Error removing temporary file: {str(e)}")
+
+@app.route('/clean_cloudinary', methods=['POST'])
+def clean_cloudinary():
+    deleted = []
+    errors = []
+    for public_id in list(uploaded_cloudinary_ids):
+        try:
+            cloudinary.uploader.destroy(public_id, resource_type="raw")
+            deleted.append(public_id)
+            uploaded_cloudinary_ids.remove(public_id)
+        except Exception as e:
+            errors.append({'public_id': public_id, 'error': str(e)})
+    return jsonify({'deleted': deleted, 'errors': errors})
 
 
 @app.route('/')
@@ -815,13 +863,14 @@ def upload_file():
         logger.error(f"Error removing from file: {str(e)}")
     
     # Save PO file
-    po_filename = secure_filename(po_file.filename)
-    po_filepath = os.path.join(app.config['UPLOAD_FOLDER'], po_filename)
-    po_file.save(po_filepath)
-    
-    # Create task and start processing
+    po_url, po_id = upload_file_to_cloudinary(po_file)
+    from_url, from_id = upload_file_to_cloudinary(from_file)
+
+    # Store Cloudinary URLs in progress_data or session as needed
     task_id = str(uuid.uuid4())
     progress_data[task_id] = {
+        'po_url': po_url,
+        'from_url': from_url,
         'current': 0,
         'total': 0,
         'status': 'Starting...',
@@ -833,9 +882,9 @@ def upload_file():
         'ai_lock': threading.Lock()
     }
     
-    threading.Thread(target=background_task, args=(po_filepath, task_id), daemon=True).start()
-    
-    return jsonify({'task_id': task_id}), 202
+    threading.Thread(target=background_task, args=(po_url, from_url, task_id), daemon=True).start()
+
+    return jsonify({'task_id': task_id}), 202    
 
 @app.route('/progress/<task_id>')
 def progress(task_id):

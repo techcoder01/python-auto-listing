@@ -7,3 +7,5 @@ Werkzeug
 gunicorn
 flask-sse
 openpyxl
+cloudinary
+python-dotenv

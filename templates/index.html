@@ -244,8 +244,10 @@
             </div>
         </div>
         
-        <button id="cleanupBtn" class="btn" onclick="cleanupFiles()">Cleanup Generated Files</button>
-        
+        <!-- <button id="cleanupBtn" class="btn" onclick="cleanupFiles()">Cleanup Generated Files</button> -->
+        <button id="clean-cloudinary-btn">Clean Cloudinary</button>
+<div id="clean-status"></div>
+
         <div id="results" style="display: none;">
             <h2>Processed Results</h2>
             <button id="downloadAllBtn" class="btn btn-secondary" style="margin-bottom: 15px;">Download All Files</button>
@@ -270,6 +272,7 @@
             </table>
         </div>
     </div>
+    
 
     <script>
         let eventSource;
@@ -308,6 +311,22 @@
                 updateProcessButton();
             }
         });
+
+        document.getElementById('clean-cloudinary-btn').onclick = function() {
+    fetch('/clean_cloudinary', {method: 'POST'})
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('clean-status').innerText = 'Cloudinary cleaned successfully!';
+            } else {
+                document.getElementById('clean-status').innerText = 'Failed to clean: ' + (data.message || data.error);
+            }
+        })
+        .catch(error => {
+            document.getElementById('clean-status').innerText = 'Error: ' + error;
+        });
+};
+
         
         // Handle drag and drop for the drop zone
         document.getElementById('dropZone').addEventListener('dragover', function(e) {
@@ -407,6 +426,7 @@ document.getElementById('fromFileInput').addEventListener('change', function() {
         }
     }
 });
+
 
 // Update the main drop zone with better visual cues
 const dropZone = document.getElementById('dropZone');
