@@ -23,6 +23,7 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PRODUCTS_FOLDER'] = 'products'
 app.config['ALLOWED_EXTENSIONS'] = {'xlsx', 'xls', 'csv'}
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
 
 # Enable CORS
 from flask_cors import CORS
@@ -964,7 +965,7 @@ def download_main_products_csv():
     except Exception as e:
         logger.error(f"Error creating main products CSV: {str(e)}")
         return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
-        
+
 @app.route('/cleanup', methods=['POST'])
 def cleanup_files():
     try:
