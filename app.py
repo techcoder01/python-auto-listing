@@ -906,6 +906,65 @@ def download_file(filename):
         )
     return jsonify({'error': 'File not found'}), 404
 
+@app.route('/download_main_products_csv')
+def download_main_products_csv():
+    try:
+        global latest_products, from_info
+        if not latest_products:
+            return jsonify({'error': 'No product data available. Please upload and process a PO file first.'}), 404
+
+        headers = [
+            'FromName', 'FromCompany', 'FromStreet', 'FromStreet2', 'FromCity', 'FromState',
+            'FromZip', 'FromPhone', 'ToName', 'ToCompany', 'ToStreet', 'ToStreet2',
+            'ToCity', 'ToState', 'ToZip', 'ToPhone', 'Weight', 'Length', 'Width',
+            'Height', 'Description', 'order num', 'Reference2', 'Signature'
+        ]
+
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(headers)
+
+        for product_data in latest_products:
+            row = [
+                from_info.get('FromName', ''),
+                from_info.get('FromCompany', ''),
+                from_info.get('FromStreet', ''),
+                from_info.get('FromStreet2', ''),
+                from_info.get('FromCity', ''),
+                from_info.get('FromState', ''),
+                from_info.get('FromZip', ''),
+                from_info.get('FromPhone', ''),
+                product_data['to_info'].get('ToName', ''),
+                product_data['to_info'].get('ToCompany', ''),
+                product_data['to_info'].get('ToStreet', ''),
+                product_data['to_info'].get('ToStreet2', ''),
+                product_data['to_info'].get('ToCity', ''),
+                product_data['to_info'].get('ToState', ''),
+                product_data['to_info'].get('ToZip', ''),
+                product_data['to_info'].get('ToPhone', ''),
+                product_data.get('weight', ''),
+                product_data.get('length', ''),
+                product_data.get('width', ''),
+                product_data.get('height', ''),
+                product_data.get('short_description', ''),  # Use shortened description
+                product_data.get('order_number', ''),
+                product_data.get('po_number', ''),
+                ''  # Signature empty
+            ]
+            writer.writerow(row)
+
+        output.seek(0)
+
+        return send_file(
+            output,
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name='all_products.csv'
+        )
+    except Exception as e:
+        logger.error(f"Error creating main products CSV: {str(e)}")
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+        
 @app.route('/cleanup', methods=['POST'])
 def cleanup_files():
     try:
