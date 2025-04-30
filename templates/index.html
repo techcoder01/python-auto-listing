@@ -457,7 +457,7 @@ dropZone.innerHTML = `
             if (currentTaskId) {
                 // Create download link for the zip file
                 const link = document.createElement('a');
-                link.href = `http://localhost:5000/download-all/${currentTaskId}`;
+                link.href = `https://python-auto-listing.onrender.com/download-all/${currentTaskId}`;
                 link.download = `shipping_files.zip`;
                 document.body.appendChild(link);
                 link.click();
@@ -480,7 +480,7 @@ dropZone.innerHTML = `
             // Disable process button immediately
             document.getElementById('processBtn').disabled = true;
             
-            fetch('http://localhost:5000/stop_execution', {
+            fetch('https://python-auto-listing.onrender.com/stop_execution', {
                 method: 'POST'
             })
             .then(response => response.json())
@@ -519,7 +519,7 @@ dropZone.innerHTML = `
             btn.disabled = true;
             btn.textContent = 'Resetting...';
             
-            fetch('http://localhost:5000/reset_execution_flag', {
+            fetch('https://python-auto-listing.onrender.com/reset_execution_flag', {
                 method: 'POST'
             })
             .then(response => response.json())
@@ -557,7 +557,7 @@ dropZone.innerHTML = `
                 return;
             }
             
-            fetch('http://localhost:5000/update_api_key', {
+            fetch('https://python-auto-listing.onrender.com/update_api_key', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -620,7 +620,7 @@ dropZone.innerHTML = `
             processBtn.disabled = true;
             processBtn.textContent = 'Processing...';
             
-            fetch('http://localhost:5000/upload', {
+            fetch('https://python-auto-listing.onrender.com/upload', {
                 method: 'POST',
                 body: formData,
             })
@@ -649,7 +649,7 @@ dropZone.innerHTML = `
             }
             
             // Connect to the SSE endpoint
-            eventSource = new EventSource(`http://localhost:5000/stream?channel=${taskId}`);
+            eventSource = new EventSource(`https://python-auto-listing.onrender.com/stream?channel=${taskId}`);
             
             // Listen for progress events
             eventSource.addEventListener('progress', function(e) {
@@ -676,7 +676,7 @@ dropZone.innerHTML = `
         // Fallback to polling if SSE fails
         function checkProgressManually(taskId) {
             const intervalId = setInterval(() => {
-                fetch(`http://localhost:5000/progress/${taskId}`)
+                fetch(`https://python-auto-listing.onrender.com/progress/${taskId}`)
                     .then(response => response.json())
                     .then(progress => {
                         updateProgressUI(progress);
@@ -782,7 +782,7 @@ dropZone.innerHTML = `
                     <td>${(toInfo.ToStreet || '') + ' ' + (toInfo.ToStreet2 || '')}</td>
                     <td>${toInfo.ToCity || ''}, ${toInfo.ToState || ''} ${toInfo.ToZip || ''}</td>
                     <td>${toInfo.ToPhone || 'N/A'}</td>
-                    <td><a href="http://localhost:5000${product.download_url}" class="download-btn">Download</a></td>
+                    <td><a href="https://python-auto-listing.onrender.com${product.download_url}" class="download-btn">Download</a></td>
                 `;
                 
                 resultsBody.appendChild(row);
@@ -797,7 +797,7 @@ dropZone.innerHTML = `
                 cleanupBtn.textContent = 'Cleaning...';
                 cleanupBtn.disabled = true;
                 
-                const response = await fetch('http://localhost:5000/cleanup', {
+                const response = await fetch('https://python-auto-listing.onrender.com/cleanup', {
                     method: 'POST'
                 });
                 
