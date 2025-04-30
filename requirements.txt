@@ -6,3 +6,4 @@ google-generativeai
 Werkzeug
 gunicorn
 flask-sse
+openpyxl
