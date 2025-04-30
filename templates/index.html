@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PO File Processor</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            border: 1px solid #ddd;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .upload-area {
+            border: 2px dashed #4CAF50;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.3s;
+        }
+        .upload-area:hover {
+            background-color: #f5f9f5;
+            border-color: #45a049;
+        }
+        .upload-area h3 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        .upload-area p {
+            color: #666;
+        }
+        .files-container {
+            display: flex;
+            justify-content: space-between;
+            gap: 20px;
+        }
+        .file-item {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            position: relative;
+        }
+        .file-item.uploaded {
+            background-color: #E8F5E9;
+            border-color: #4CAF50;
+        }
+        .file-item h4 {
+            margin-top: 0;
+            color: #4CAF50;
+        }
+        .file-clear {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            cursor: pointer;
+            color: #f44336;
+            font-weight: bold;
+            font-size: 18px;
+        }
+        .result-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .result-table th, .result-table td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        .result-table th {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .result-table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .result-table tr:hover {
+            background-color: #f0f0f0;
+        }
+        .download-btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 8px 12px;
+            text-decoration: none;
+            border-radius: 4px;
+            display: inline-block;
+            transition: background-color 0.3s;
+        }
+        .download-btn:hover {
+            background-color: #45a049;
+        }
+        .progress-container {
+            margin: 20px 0;
+            display: none;
+        }
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        .progress-bar {
+            width: 100%;
+            background-color: #f1f1f1;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .progress {
+            height: 25px;
+            border-radius: 5px;
+            background-color: #4CAF50;
+            width: 0%;
+            text-align: center;
+            line-height: 25px;
+            color: white;
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .ai-stats {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+        .stat-item {
+            background-color: #f9f9f9;
+            padding: 5px 10px;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        .stat-success {
+            color: #4CAF50;
+        }
+        .stat-failed {
+            color: #f44336;
+        }
+        .btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+            margin: 10px 0;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        .btn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background-color: #5c6bc0;
+        }
+        .btn-secondary:hover {
+            background-color: #3f51b5;
+        }
+        .error-message {
+            color: #f44336;
+            background-color: #ffebee;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PO File Processor</h1>
+        <p>Upload your PO file and From Information file to generate shipping files for each product.</p>
+        
+        <div class="error-message" id="errorMessage"></div>
+        <!-- Add this section near the top of your container div -->
+<div class="api-key-container" style="margin-bottom: 20px;">
+    <h3>Gemini API Key</h3>
+    <div style="display: flex; gap: 10px; align-items: center;">
+        <input type="password" id="apiKeyInput" placeholder="Enter your Gemini API key" 
+               style="flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px;">
+        <button id="updateApiKeyBtn" class="btn" style="margin: 0;">Update Key</button>
+    </div>
+    <p style="font-size: 12px; color: #666; margin-top: 5px;">
+        Current key: <span id="currentKeyStatus">Using default key</span>
+    </p>
+</div>
+
+        <div class="upload-area" id="dropZone">
+            
+            <h3>Upload Files</h3>
+            <p>Drag and drop your files here or click to select</p>
+            <p><small>Supported formats: Excel (.xlsx, .xls) and CSV files</small></p>
+        </div>
+        
+        <div class="files-container">
+            <div class="file-item" id="poFileItem">
+                <h4>PO File</h4>
+                <p id="poFileName">No file selected</p>
+                <input type="file" id="poFileInput" accept=".xlsx,.xls,.csv" style="display: none;">
+                <span class="file-clear" id="poFileClear" style="display: none;">×</span>
+            </div>
+            <div class="file-item" id="fromFileItem">
+                <h4>From Info File</h4>
+                <p id="fromFileName">No file selected</p>
+                <input type="file" id="fromFileInput" accept=".xlsx,.xls,.csv" style="display: none;">
+                <span class="file-clear" id="fromFileClear" style="display: none;">×</span>
+            </div>
+        </div>
+        
+        <button id="processBtn" class="btn" disabled>Process Files</button>
+        <div style="display: flex; gap: 10px; margin: 10px 0;">
+            <button id="stopExecutionBtn" class="btn" style="background-color: #f44336;">Stop All Processing</button>
+            <button id="resetExecutionBtn" class="btn" style="background-color: #ff9800;">Reset Processor</button>
+        </div>
+        
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-info">
+                <span id="progressStatus">Starting...</span>
+                <span id="progressCount">0/0</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress" id="progress">0%</div>
+            </div>
+            <div class="ai-stats">
+                <div class="stat-item">Processing: <span id="processingStatus">Not started</span></div>
+                <div class="stat-item">AI Processed: <span id="aiSuccess" class="stat-success">0</span></div>
+                <div class="stat-item">AI Fallbacks: <span id="aiFallbacks" class="stat-failed">0</span></div>
+            </div>
+        </div>
+        
+        <button id="cleanupBtn" class="btn" onclick="cleanupFiles()">Cleanup Generated Files</button>
+        
+        <div id="results" style="display: none;">
+            <h2>Processed Results</h2>
+            <button id="downloadAllBtn" class="btn btn-secondary" style="margin-bottom: 15px;">Download All Files</button>
+            <a href="/download_unique_products_zip" class="btn btn-primary">
+                Download All Unique Products CSVs (ZIP)
+            </a>
+            <a href="/download_main_products_csv" class="btn btn-primary">
+                Download All Products in One CSV
+            </a>            
+            <table class="result-table" id="resultsTable">
+                <thead>
+                    <tr>
+                        <th>Product</th>
+                        <th>Customer Name</th>
+                        <th>Address</th>
+                        <th>City, State ZIP</th>
+                        <th>Phone</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="resultsBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let eventSource;
+        let currentTaskId;
+        let processedProducts = [];
+        let poFile = null;
+        let fromFile = null;
+        
+        // Set up file input triggers
+        document.getElementById('poFileItem').addEventListener('click', () => {
+            document.getElementById('poFileInput').click();
+        });
+        
+        document.getElementById('fromFileItem').addEventListener('click', () => {
+            document.getElementById('fromFileInput').click();
+        });
+        
+        // Handle file selection for PO file
+        document.getElementById('poFileInput').addEventListener('change', function() {
+            if (this.files.length > 0) {
+                poFile = this.files[0];
+                document.getElementById('poFileName').textContent = poFile.name;
+                document.getElementById('poFileItem').classList.add('uploaded');
+                document.getElementById('poFileClear').style.display = 'block';
+                updateProcessButton();
+            }
+        });
+        
+        // Handle file selection for From file
+        document.getElementById('fromFileInput').addEventListener('change', function() {
+            if (this.files.length > 0) {
+                fromFile = this.files[0];
+                document.getElementById('fromFileName').textContent = fromFile.name;
+                document.getElementById('fromFileItem').classList.add('uploaded');
+                document.getElementById('fromFileClear').style.display = 'block';
+                updateProcessButton();
+            }
+        });
+        
+        // Handle drag and drop for the drop zone
+        document.getElementById('dropZone').addEventListener('dragover', function(e) {
+            e.preventDefault();
+            this.style.backgroundColor = '#f0f0f0';
+        });
+        
+        document.getElementById('dropZone').addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            this.style.backgroundColor = '';
+        });
+        
+// Updated drop zone functionality
+document.getElementById('dropZone').addEventListener('drop', function(e) {
+    e.preventDefault();
+    this.style.backgroundColor = '';
+    
+    if (e.dataTransfer.files.length) {
+        // If two files are dropped, handle both automatically
+        if (e.dataTransfer.files.length >= 2) {
+            // Process the first two files
+            handleFileSelection(e.dataTransfer.files[0], 'po');
+            handleFileSelection(e.dataTransfer.files[1], 'from');
+            
+            // If both files are now selected, automatically start processing
+            if (poFile && fromFile) {
+                processFiles();
+            }
+        } else {
+            // If only one file is dropped and we need the other one
+            const file = e.dataTransfer.files[0];
+            
+            if (!poFile && !fromFile) {
+                // If neither file is selected, ask which one this is
+                const fileType = confirm('Is this a PO file? Click OK for PO file or Cancel for From information file.');
+                if (fileType) {
+                    handleFileSelection(file, 'po');
+                } else {
+                    handleFileSelection(file, 'from');
+                }
+            } else if (!poFile) {
+                // If we need a PO file, assume this is it
+                handleFileSelection(file, 'po');
+                
+                // If both files are now selected, automatically start processing
+                if (poFile && fromFile) {
+                    processFiles();
+                }
+            } else if (!fromFile) {
+                // If we need a From file, assume this is it
+                handleFileSelection(file, 'from');
+                
+                // If both files are now selected, automatically start processing
+                if (poFile && fromFile) {
+                    processFiles();
+                }
+            }
+        }
+    }
+});
+
+// Helper function to handle file selection
+function handleFileSelection(file, type) {
+    if (type === 'po') {
+        poFile = file;
+        document.getElementById('poFileName').textContent = poFile.name;
+        document.getElementById('poFileItem').classList.add('uploaded');
+        document.getElementById('poFileClear').style.display = 'block';
+    } else if (type === 'from') {
+        fromFile = file;
+        document.getElementById('fromFileName').textContent = fromFile.name;
+        document.getElementById('fromFileItem').classList.add('uploaded');
+        document.getElementById('fromFileClear').style.display = 'block';
+    }
+    updateProcessButton();
+}
+
+// Updated file input handlers to use the helper function
+document.getElementById('poFileInput').addEventListener('change', function() {
+    if (this.files.length > 0) {
+        handleFileSelection(this.files[0], 'po');
+        
+        // Auto-start processing if both files are selected
+        if (poFile && fromFile) {
+            processFiles();
+        }
+    }
+});
+
+document.getElementById('fromFileInput').addEventListener('change', function() {
+    if (this.files.length > 0) {
+        handleFileSelection(this.files[0], 'from');
+        
+        // Auto-start processing if both files are selected
+        if (poFile && fromFile) {
+            processFiles();
+        }
+    }
+});
+
+// Update the main drop zone with better visual cues
+const dropZone = document.getElementById('dropZone');
+dropZone.innerHTML = `
+    <h3>Upload Files (Quick Start)</h3>
+    <p>Drag and drop both files here at once to automatically process</p>
+    <p>-- OR --</p>
+    <p>Click below to select files individually</p>
+    <div style="display: flex; gap: 10px; justify-content: center; margin-top: 10px;">
+        <button class="btn" style="margin: 0;" onclick="document.getElementById('poFileInput').click(); event.stopPropagation();">Select PO File</button>
+        <button class="btn" style="margin: 0;" onclick="document.getElementById('fromFileInput').click(); event.stopPropagation();">Select From File</button>
+    </div>
+    <p><small>Supported formats: Excel (.xlsx, .xls) and CSV files</small></p>
+`;
+        // Clear file selections
+        document.getElementById('poFileClear').addEventListener('click', function(e) {
+            e.stopPropagation();
+            poFile = null;
+            document.getElementById('poFileName').textContent = 'No file selected';
+            document.getElementById('poFileItem').classList.remove('uploaded');
+            document.getElementById('poFileClear').style.display = 'none';
+            document.getElementById('poFileInput').value = '';
+            updateProcessButton();
+        });
+        
+        document.getElementById('fromFileClear').addEventListener('click', function(e) {
+            e.stopPropagation();
+            fromFile = null;
+            document.getElementById('fromFileName').textContent = 'No file selected';
+            document.getElementById('fromFileItem').classList.remove('uploaded');
+            document.getElementById('fromFileClear').style.display = 'none';
+            document.getElementById('fromFileInput').value = '';
+            updateProcessButton();
+        });
+        
+        // Enable/disable process button based on file selection
+        function updateProcessButton() {
+            const processBtn = document.getElementById('processBtn');
+            processBtn.disabled = !(poFile && fromFile);
+        }
+        
+        // Process button click handler
+        document.getElementById('processBtn').addEventListener('click', processFiles);
+        
+        // Download all files functionality
+        // Update the download all button to use the zip feature
+        document.getElementById('downloadAllBtn').addEventListener('click', function() {
+            if (currentTaskId) {
+                // Create download link for the zip file
+                const link = document.createElement('a');
+                link.href = `http://localhost:5000/download-all/${currentTaskId}`;
+                link.download = `shipping_files.zip`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } else {
+                showError('No active task to download files from');
+            }
+        });
+        // Add this JavaScript to handle API key updates
+        document.getElementById('updateApiKeyBtn').addEventListener('click', updateApiKey);
+        // Add to your existing JavaScript
+        document.getElementById('stopExecutionBtn').addEventListener('click', stopExecution);
+        document.getElementById('resetExecutionBtn').addEventListener('click', resetExecution);
+
+        function stopExecution() {
+            const btn = document.getElementById('stopExecutionBtn');
+            btn.disabled = true;
+            btn.textContent = 'Stopping...';
+            
+            // Disable process button immediately
+            document.getElementById('processBtn').disabled = true;
+            
+            fetch('http://localhost:5000/stop_execution', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    // Show stopped message
+                    const errorMsg = document.getElementById('errorMessage');
+                    errorMsg.textContent = 'Processing stopped successfully';
+                    errorMsg.style.display = 'block';
+                    errorMsg.style.color = '#f44336';
+                    errorMsg.style.backgroundColor = '#ffebee';
+                    
+                    // Update progress UI to show stopped state
+                    document.getElementById('progressStatus').textContent = 'Stopped by user';
+                    document.getElementById('processingStatus').textContent = 'Stopped';
+                    document.getElementById('processingStatus').style.color = '#f44336';
+                    
+                    setTimeout(() => {
+                        errorMsg.style.display = 'none';
+                    }, 3000);
+                }
+            })
+            .catch(error => {
+                showError('Error stopping execution: ' + error.message);
+            })
+            .finally(() => {
+                btn.disabled = false;
+                btn.textContent = 'Stop All Processing';
+            });
+        }
+        
+        function resetExecution() {
+            const btn = document.getElementById('resetExecutionBtn');
+            btn.disabled = true;
+            btn.textContent = 'Resetting...';
+            
+            fetch('http://localhost:5000/reset_execution_flag', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    // Show reset message
+                    const errorMsg = document.getElementById('errorMessage');
+                    errorMsg.textContent = 'Processor reset successfully - ready for new tasks';
+                    errorMsg.style.display = 'block';
+                    errorMsg.style.color = '#4CAF50';
+                    errorMsg.style.backgroundColor = '#E8F5E9';
+                    
+                    setTimeout(() => {
+                        errorMsg.style.display = 'none';
+                    }, 3000);
+                }
+            })
+            .catch(error => {
+                showError('Error resetting processor: ' + error.message);
+            })
+            .finally(() => {
+                btn.disabled = false;
+                btn.textContent = 'Reset Processor';
+            });
+        }
+        function updateApiKey() {
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            const apiKey = apiKeyInput.value.trim();
+            const currentKeyStatus = document.getElementById('currentKeyStatus');
+            
+            if (!apiKey) {
+                showError('Please enter an API key');
+                return;
+            }
+            
+            fetch('http://localhost:5000/update_api_key', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ api_key: apiKey })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    // Show success message
+                    const errorMsg = document.getElementById('errorMessage');
+                    errorMsg.textContent = 'API key updated successfully';
+                    errorMsg.style.display = 'block';
+                    errorMsg.style.color = '#4CAF50';
+                    errorMsg.style.backgroundColor = '#E8F5E9';
+                    
+                    // Update current key status
+                    currentKeyStatus.textContent = 'Using custom key';
+                    currentKeyStatus.style.color = '#4CAF50';
+                    
+                    // Clear the input
+                    apiKeyInput.value = '';
+                    
+                    // Hide the message after 3 seconds
+                    setTimeout(() => {
+                        errorMsg.style.display = 'none';
+                    }, 3000);
+                }
+            })
+            .catch(error => {
+                showError('Error updating API key: ' + error.message);
+            });
+        }
+
+        function processFiles() {
+            if (!poFile || !fromFile) {
+                showError('Please select both PO file and From information file');
+                return;
+            }
+            
+            // Reset UI
+            hideError();
+            resetProgressUI();
+            
+            const formData = new FormData();
+            formData.append('po_file', poFile);
+            formData.append('from_file', fromFile);
+            
+            // Include the API key if one was entered
+            const apiKey = document.getElementById('apiKeyInput').value.trim();
+            if (apiKey) {
+                formData.append('gemini_api_key', apiKey);
+            }
+            
+            
+            // Disable process button
+            const processBtn = document.getElementById('processBtn');
+            processBtn.disabled = true;
+            processBtn.textContent = 'Processing...';
+            
+            fetch('http://localhost:5000/upload', {
+                method: 'POST',
+                body: formData,
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                
+                currentTaskId = data.task_id;
+                setupEventSource(currentTaskId);
+            })
+            .catch(error => {
+                showError('Error uploading files: ' + error.message);
+                document.getElementById('progressContainer').style.display = 'none';
+                
+                // Re-enable process button
+                processBtn.disabled = false;
+                processBtn.textContent = 'Process Files';
+            });
+        }
+        
+        function setupEventSource(taskId) {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            // Connect to the SSE endpoint
+            eventSource = new EventSource(`http://localhost:5000/stream?channel=${taskId}`);
+            
+            // Listen for progress events
+            eventSource.addEventListener('progress', function(e) {
+                const data = JSON.parse(e.data);
+                updateProgressUI(data.progress);
+                
+                // If completed or error, close the connection
+                if (data.progress.success || data.progress.error) {
+                    eventSource.close();
+                    // Re-enable process button
+                    const processBtn = document.getElementById('processBtn');
+                    processBtn.disabled = false;
+                    processBtn.textContent = 'Process Files';
+                }
+            });
+            
+            // Handle connection errors
+            eventSource.onerror = function() {
+                eventSource.close();
+                checkProgressManually(taskId);
+            };
+        }
+        
+        // Fallback to polling if SSE fails
+        function checkProgressManually(taskId) {
+            const intervalId = setInterval(() => {
+                fetch(`http://localhost:5000/progress/${taskId}`)
+                    .then(response => response.json())
+                    .then(progress => {
+                        updateProgressUI(progress);
+                        
+                        if (progress.success || progress.error) {
+                            clearInterval(intervalId);
+                            // Re-enable process button
+                            const processBtn = document.getElementById('processBtn');
+                            processBtn.disabled = false;
+                            processBtn.textContent = 'Process Files';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error checking progress:', error);
+                        clearInterval(intervalId);
+                        showError('Lost connection to server. Please refresh and try again.');
+                        
+                        // Re-enable process button
+                        const processBtn = document.getElementById('processBtn');
+                        processBtn.disabled = false;
+                        processBtn.textContent = 'Process Files';
+                    });
+            }, 1000);
+        }
+        
+        function updateProgressUI(progress) {
+            const progressBar = document.getElementById('progress');
+            const progressStatus = document.getElementById('progressStatus');
+            const progressCount = document.getElementById('progressCount');
+            const processingStatus = document.getElementById('processingStatus');
+            const aiSuccess = document.getElementById('aiSuccess');
+            const aiFallbacks = document.getElementById('aiFallbacks');
+            
+            // Update progress count and status
+            progressCount.textContent = `${progress.current}/${progress.total}`;
+            progressStatus.textContent = progress.status;
+            
+            // Calculate and update progress percentage
+            let percentage = 0;
+            if (progress.total > 0) {
+                percentage = Math.round((progress.current / progress.total) * 100);
+            }
+            progressBar.style.width = percentage + '%';
+            progressBar.textContent = percentage + '%';
+            
+            // Update AI stats
+            aiSuccess.textContent = progress.ai_success || 0;
+            aiFallbacks.textContent = progress.ai_failed || 0;
+            
+            // Update processing status text
+            if (progress.success) {
+                processingStatus.textContent = 'Complete';
+                processingStatus.style.color = '#4CAF50';
+            } else if (progress.error) {
+                processingStatus.textContent = 'Error';
+                processingStatus.style.color = '#f44336';
+            } else {
+                processingStatus.textContent = 'Processing';
+            }
+            
+            // If there are products, display them
+            if (progress.products && progress.products.length > 0) {
+                processedProducts = progress.products;
+                displayResults(progress.products);
+            }
+            
+            // If there's an error, show it
+            if (progress.error) {
+                showError('Error processing file: ' + progress.error);
+            }
+        }
+        
+        function resetProgressUI() {
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('progress').style.width = '0%';
+            document.getElementById('progress').textContent = '0%';
+            document.getElementById('progressStatus').textContent = 'Starting...';
+            document.getElementById('progressCount').textContent = '0/0';
+            document.getElementById('processingStatus').textContent = 'Starting';
+            document.getElementById('aiSuccess').textContent = '0';
+            document.getElementById('aiFallbacks').textContent = '0';
+            document.getElementById('results').style.display = 'none';
+            document.getElementById('resultsBody').innerHTML = '';
+            processedProducts = [];
+        }
+        
+        function displayResults(products) {
+            const resultsDiv = document.getElementById('results');
+            const resultsBody = document.getElementById('resultsBody');
+            
+            // Clear existing rows
+            resultsBody.innerHTML = '';
+            
+            // Add rows for each product
+            products.forEach(product => {
+                const row = document.createElement('tr');
+                
+                const toInfo = product.to_info || {};
+                
+                row.innerHTML = `
+                    <td>${product.product || 'N/A'}</td>
+                    <td>${toInfo.ToName || 'N/A'}</td>
+                    <td>${(toInfo.ToStreet || '') + ' ' + (toInfo.ToStreet2 || '')}</td>
+                    <td>${toInfo.ToCity || ''}, ${toInfo.ToState || ''} ${toInfo.ToZip || ''}</td>
+                    <td>${toInfo.ToPhone || 'N/A'}</td>
+                    <td><a href="http://localhost:5000${product.download_url}" class="download-btn">Download</a></td>
+                `;
+                
+                resultsBody.appendChild(row);
+            });
+            
+            resultsDiv.style.display = 'block';
+        }
+        
+        async function cleanupFiles() {
+            try {
+                const cleanupBtn = document.getElementById('cleanupBtn');
+                cleanupBtn.textContent = 'Cleaning...';
+                cleanupBtn.disabled = true;
+                
+                const response = await fetch('http://localhost:5000/cleanup', {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Reset UI
+                    document.getElementById('results').style.display = 'none';
+                    document.getElementById('resultsBody').innerHTML = '';
+                    processedProducts = [];
+                    
+                    // Show success message
+                    const errorMsg = document.getElementById('errorMessage');
+                    errorMsg.textContent = 'All generated files have been cleaned up successfully';
+                    errorMsg.style.display = 'block';
+                    errorMsg.style.color = '#4CAF50';
+                    errorMsg.style.backgroundColor = '#E8F5E9';
+                    
+                    // Hide the message after 3 seconds
+                    setTimeout(() => {
+                        errorMsg.style.display = 'none';
+                    }, 3000);
+                } else {
+                    showError('Error during cleanup: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                showError('Error cleaning up files: ' + error.message);
+            } finally {
+                // Re-enable the button
+                const cleanupBtn = document.getElementById('cleanupBtn');
+                cleanupBtn.textContent = 'Cleanup Generated Files';
+                cleanupBtn.disabled = false;
+            }
+        }
+        
+        function showError(message) {
+            const errorMsg = document.getElementById('errorMessage');
+            errorMsg.textContent = message;
+            errorMsg.style.display = 'block';
+            errorMsg.style.color = '#f44336';
+            errorMsg.style.backgroundColor = '#ffebee';
+        }
+        
+        function hideError() {
+            document.getElementById('errorMessage').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
