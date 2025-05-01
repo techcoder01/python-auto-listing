@@ -424,7 +424,7 @@ def background_task(file_content, filename, task_id):
                 if retry_data:
                     retry_items.append(retry_data)
             
-            max_retries = 5
+            max_retries = 100
             retry_count = 0
             
             while retry_items and retry_count < max_retries:
