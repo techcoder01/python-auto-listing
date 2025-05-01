@@ -244,10 +244,8 @@
             </div>
         </div>
         
-        <!-- <button id="cleanupBtn" class="btn" onclick="cleanupFiles()">Cleanup Generated Files</button> -->
-        <button id="clean-cloudinary-btn">Clean Cloudinary</button>
-<div id="clean-status"></div>
-
+        <button id="cleanupBtn" class="btn" onclick="cleanupFiles()">Cleanup Generated Files</button>
+        
         <div id="results" style="display: none;">
             <h2>Processed Results</h2>
             <button id="downloadAllBtn" class="btn btn-secondary" style="margin-bottom: 15px;">Download All Files</button>
@@ -265,14 +263,12 @@
                         <th>Address</th>
                         <th>City, State ZIP</th>
                         <th>Phone</th>
-                        <th>Action</th>
                     </tr>
                 </thead>
                 <tbody id="resultsBody"></tbody>
             </table>
         </div>
     </div>
-    
 
     <script>
         let eventSource;
@@ -311,22 +307,6 @@
                 updateProcessButton();
             }
         });
-
-        document.getElementById('clean-cloudinary-btn').onclick = function() {
-    fetch('/clean_cloudinary', {method: 'POST'})
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                document.getElementById('clean-status').innerText = 'Cloudinary cleaned successfully!';
-            } else {
-                document.getElementById('clean-status').innerText = 'Failed to clean: ' + (data.message || data.error);
-            }
-        })
-        .catch(error => {
-            document.getElementById('clean-status').innerText = 'Error: ' + error;
-        });
-};
-
         
         // Handle drag and drop for the drop zone
         document.getElementById('dropZone').addEventListener('dragover', function(e) {
@@ -427,7 +407,6 @@ document.getElementById('fromFileInput').addEventListener('change', function() {
     }
 });
 
-
 // Update the main drop zone with better visual cues
 const dropZone = document.getElementById('dropZone');
 dropZone.innerHTML = `
@@ -473,19 +452,54 @@ dropZone.innerHTML = `
         
         // Download all files functionality
         // Update the download all button to use the zip feature
-        document.getElementById('downloadAllBtn').addEventListener('click', function() {
-            if (currentTaskId) {
-                // Create download link for the zip file
-                const link = document.createElement('a');
-                link.href = `https://web-production-0cee.up.railway.app/download-all/${currentTaskId}`;
-                link.download = `shipping_files.zip`;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-            } else {
-                showError('No active task to download files from');
-            }
-        });
+// Replace the existing downloadAllBtn event listener with this:
+document.getElementById('downloadAllBtn').addEventListener('click', function(e) {
+    e.preventDefault(); // Prevent default behavior
+    
+    if (currentTaskId) {
+        // Show loading state
+        const btn = this;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Preparing Download...';
+        
+        // Create a temporary anchor element for the download
+        const link = document.createElement('a');
+        link.href = `http://localhost:5000/download-all/${currentTaskId}`;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        
+        // Trigger the download
+        link.click();
+        
+        // Reset the button immediately (we don't need to wait for download to complete)
+        setTimeout(() => {
+            btn.disabled = false;
+            btn.textContent = originalText;
+            document.body.removeChild(link);
+        }, 1000); // Short delay to ensure download starts
+        
+    } else {
+        showError('No active task to download files from');
+    }
+});
+// Also update the download links for the other buttons to prevent page refresh:
+document.querySelector('a[href="/download_unique_products_zip"]').addEventListener('click', function(e) {
+    e.preventDefault();
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = this.href;
+    document.body.appendChild(iframe);
+});
+
+document.querySelector('a[href="/download_main_products_csv"]').addEventListener('click', function(e) {
+    e.preventDefault();
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = this.href;
+    document.body.appendChild(iframe);
+});
+
         // Add this JavaScript to handle API key updates
         document.getElementById('updateApiKeyBtn').addEventListener('click', updateApiKey);
         // Add to your existing JavaScript
@@ -500,7 +514,7 @@ dropZone.innerHTML = `
             // Disable process button immediately
             document.getElementById('processBtn').disabled = true;
             
-            fetch('https://web-production-0cee.up.railway.app/stop_execution', {
+            fetch('http://localhost:5000/stop_execution', {
                 method: 'POST'
             })
             .then(response => response.json())
@@ -539,7 +553,7 @@ dropZone.innerHTML = `
             btn.disabled = true;
             btn.textContent = 'Resetting...';
             
-            fetch('https://web-production-0cee.up.railway.app/reset_execution_flag', {
+            fetch('http://localhost:5000/reset_execution_flag', {
                 method: 'POST'
             })
             .then(response => response.json())
@@ -577,7 +591,7 @@ dropZone.innerHTML = `
                 return;
             }
             
-            fetch('https://web-production-0cee.up.railway.app/update_api_key', {
+            fetch('http://localhost:5000/update_api_key', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -640,7 +654,7 @@ dropZone.innerHTML = `
             processBtn.disabled = true;
             processBtn.textContent = 'Processing...';
             
-            fetch('https://web-production-0cee.up.railway.app/upload', {
+            fetch('http://localhost:5000/upload', {
                 method: 'POST',
                 body: formData,
             })
@@ -669,7 +683,7 @@ dropZone.innerHTML = `
             }
             
             // Connect to the SSE endpoint
-            eventSource = new EventSource(`https://web-production-0cee.up.railway.app/stream?channel=${taskId}`);
+            eventSource = new EventSource(`http://localhost:5000/stream?channel=${taskId}`);
             
             // Listen for progress events
             eventSource.addEventListener('progress', function(e) {
@@ -696,7 +710,7 @@ dropZone.innerHTML = `
         // Fallback to polling if SSE fails
         function checkProgressManually(taskId) {
             const intervalId = setInterval(() => {
-                fetch(`https://web-production-0cee.up.railway.app/progress/${taskId}`)
+                fetch(`http://localhost:5000/progress/${taskId}`)
                     .then(response => response.json())
                     .then(progress => {
                         updateProgressUI(progress);
@@ -802,7 +816,6 @@ dropZone.innerHTML = `
                     <td>${(toInfo.ToStreet || '') + ' ' + (toInfo.ToStreet2 || '')}</td>
                     <td>${toInfo.ToCity || ''}, ${toInfo.ToState || ''} ${toInfo.ToZip || ''}</td>
                     <td>${toInfo.ToPhone || 'N/A'}</td>
-                    <td><a href="https://web-production-0cee.up.railway.app${product.download_url}" class="download-btn">Download</a></td>
                 `;
                 
                 resultsBody.appendChild(row);
@@ -817,7 +830,7 @@ dropZone.innerHTML = `
                 cleanupBtn.textContent = 'Cleaning...';
                 cleanupBtn.disabled = true;
                 
-                const response = await fetch('https://web-production-0cee.up.railway.app/cleanup', {
+                const response = await fetch('http://localhost:5000/cleanup', {
                     method: 'POST'
                 });
                 

@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file, render_template, Response
+from flask import Flask, request, jsonify, send_file, render_template, Response, redirect, url_for
 from werkzeug.utils import secure_filename
 import os
 import pandas as pd
@@ -14,196 +14,62 @@ import json
 import logging
 import queue
 import re
-import requests
-import cloudinary
-import cloudinary.uploader
-import cloudinary.api
-
-cloudinary.config(
-    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-    api_key=os.environ.get('CLOUDINARY_API_KEY'),
-    api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
-    secure=True
-)
-
-uploaded_cloudinary_ids = set()
-
-def upload_file_to_cloudinary(file_storage):
-    result = cloudinary.uploader.upload(
-        file_storage,
-        resource_type="raw"
-    )
-    uploaded_cloudinary_ids.add(result['public_id'])
-    return result['secure_url'], result['public_id']
-
-def download_file_from_url(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    return BytesIO(response.content)
+import zipfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['PRODUCTS_FOLDER'] = 'products'
 app.config['ALLOWED_EXTENSIONS'] = {'xlsx', 'xls', 'csv'}
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
 
 # Enable CORS
 from flask_cors import CORS
 CORS(app)
 
 # Configure Gemini API
-API_KEY = 'AIzaSyDhzCeMj7YBXh7suNKdOzyGUtnc1KWM3fc'
+API_KEY = 'AIzaSyBFBenEhzVsRRSeG0xfCfibz-Jn2EsJjNI'
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel('gemini-2.0-flash')
-global from_info  # <-- Declare here because you assign to from_info
+global from_info
 
-
-# Add these with your other global variables
+# Global variables for execution control
 stop_execution_flag = False
 stop_execution_lock = threading.Lock()
 active_threads = {}  # Track active processing threads
 threads_lock = threading.Lock()  # Lock for thread dictionary
+latest_products = []  # Store the latest processed products
+product_data_store = {}  # Store product data in memory instead of files
 
-@app.route('/stop_execution', methods=['POST'])
-def stop_execution():
-    """Endpoint to stop all Gemini API processing"""
-    global stop_execution_flag
+class SSEManager:
+    def __init__(self):
+        self.clients = {}
+        self.lock = threading.Lock()
     
-    with stop_execution_lock:
-        stop_execution_flag = True
-        
-    # Cancel any ongoing tasks
-    with threads_lock:
-        for task_id, thread_info in list(active_threads.items()):
-            if thread_info['thread'].is_alive():
-                # Mark the task as cancelled in progress data
-                with progress_data[task_id]['lock']:
-                    progress_data[task_id]['error'] = 'Processing stopped by user'
-                    progress_data[task_id]['status'] = 'Cancelled'
-                
-                # Send stop event
-                with sse_manager.lock:
-                    sse_manager.send_event(task_id, 'stop', {'message': 'Execution stopped by user'})
+    def add_client(self, task_id):
+        with self.lock:
+            if task_id not in self.clients:
+                self.clients[task_id] = queue.Queue()
+            return self.clients[task_id]
     
-    return jsonify({'success': True, 'message': 'Stopping all execution'})
+    def remove_client(self, task_id):
+        with self.lock:
+            if task_id in self.clients:
+                del self.clients[task_id]
+    
+    def send_event(self, task_id, event_type, data):
+        with self.lock:
+            if task_id in self.clients:
+                event = {
+                    'id': str(uuid.uuid4()),
+                    'event': event_type,
+                    'data': json.dumps(data)
+                }
+                self.clients[task_id].put(event)
 
-# Global from_info with default empty values
-from_info = {
-    'FromName': '',
-    'FromCompany': '',
-    'FromStreet': '',
-    'FromStreet2': '',
-    'FromCity': '',
-    'FromState': '',
-    'FromZip': '',
-    'FromPhone': ''
-}
-def extract_from_info(filepath):
-    """Extract from information from the provided file."""
-    try:
-        if filepath.endswith('.csv'):
-            df = pd.read_csv(filepath)
-        else:
-            df = pd.read_excel(filepath)
-        
-        # Get the first row of the file to extract "from" info
-        if len(df) > 0:
-            first_row = df.iloc[0]
-            global from_info
-            from_info = {
-                'FromName': safe_value(first_row.get('FromName', '')),
-                'FromCompany': safe_value(first_row.get('FromCompany', '')),
-                'FromStreet': safe_value(first_row.get('FromStreet', '')),
-                'FromStreet2': safe_value(first_row.get('FromStreet2', '')),
-                'FromCity': safe_value(first_row.get('FromCity', '')),
-                'FromState': safe_value(first_row.get('FromState', '')),
-                'FromZip': safe_value(first_row.get('FromZip', '')),
-                'FromPhone': safe_value(first_row.get('FromPhone', ''))
-            }
-            logger.info(f"Successfully extracted 'from' information: {from_info['FromName']}, {from_info['FromCity']}")
-            return True
-    except Exception as e:
-        logger.error(f"Error extracting 'from' information: {str(e)}")
-        return False
-
-
-def generate_group_csv(product_group, headers):
-    output = StringIO()
-    writer = csv.writer(output)
-    writer.writerow(headers)
-    for product_data in product_group:
-        row = [
-            from_info['FromName'], from_info['FromCompany'], from_info['FromStreet'],
-            from_info['FromStreet2'], from_info['FromCity'], from_info['FromState'],
-            from_info['FromZip'], from_info['FromPhone'],
-            product_data['to_info']['ToName'],
-            product_data['to_info']['ToCompany'],
-            product_data['to_info']['ToStreet'],
-            product_data['to_info']['ToStreet2'],
-            product_data['to_info']['ToCity'],
-            product_data['to_info']['ToState'],
-            product_data['to_info']['ToZip'],
-            product_data['to_info']['ToPhone'],
-            product_data['weight'],
-            product_data['length'],
-            product_data['width'],
-            product_data['height'],
-            product_data['short_description'],  # <-- Use short description here!
-            product_data['order_number'],
-            product_data['po_number'],
-            ''
-        ]
-        writer.writerow(row)
-    return output.getvalue()
-
-
-@app.route('/download_unique_products_zip')
-def download_unique_products_zip():
-    global latest_products, from_info  # <-- Add here for clarity
-    try:
-        global latest_products
-        if not latest_products:
-            return jsonify({'error': 'No product data available. Please upload and process a PO file first.'}), 404
-
-        # Group products by their original description
-        from collections import defaultdict
-        product_groups = defaultdict(list)
-        for product in latest_products:
-            # Find the original description for grouping
-            desc = product.get('description') or product.get('product') or 'Unknown Product'
-            product_groups[desc].append(product)
-
-        # Use your required headers
-        headers = [
-            'FromName', 'FromCompany', 'FromStreet', 'FromStreet2', 'FromCity', 'FromState',
-            'FromZip', 'FromPhone', 'ToName', 'ToCompany', 'ToStreet', 'ToStreet2',
-            'ToCity', 'ToState', 'ToZip', 'ToPhone', 'Weight', 'Length', 'Width',
-            'Height', 'Description', 'order num', 'Reference2', 'Signature'
-        ]
-
-        memory_zip = BytesIO()
-        with zipfile.ZipFile(memory_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for desc, group in product_groups.items():
-                safe_desc = re.sub(r'[^\w\s-]', '', str(desc))[:50].strip().replace(' ', '_')
-                filename = f"{safe_desc or 'Unknown_Product'}.csv"
-                csv_content = generate_group_csv(group, headers)
-                zf.writestr(filename, csv_content)
-
-        memory_zip.seek(0)
-        return send_file(
-            memory_zip,
-            mimetype='application/zip',
-            as_attachment=True,
-            download_name='unique_products.zip'
-        )
-    except Exception as e:
-        logger.error(f"Error creating ZIP for unique products: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
-
+sse_manager = SSEManager()
+progress_data = {}
 
 class StrictRateLimiter:
     def __init__(self, rate_per_minute=60):
@@ -239,40 +105,19 @@ class StrictRateLimiter:
                 sleep_time = self.interval - time_since_last
                 time.sleep(sleep_time)
             
-            self.last_request_time = time.time()
+            self.last_request_time = current_time
             self.request_count += 1
             return current_time
 
 gemini_limiter = StrictRateLimiter(rate_per_minute=60)
 
-class SSEManager:
-    def __init__(self):
-        self.clients = {}
-        self.lock = threading.Lock()
-    
-    def add_client(self, task_id):
-        with self.lock:
-            if task_id not in self.clients:
-                self.clients[task_id] = queue.Queue()
-            return self.clients[task_id]
-    
-    def remove_client(self, task_id):
-        with self.lock:
-            if task_id in self.clients:
-                del self.clients[task_id]
-    
-    def send_event(self, task_id, event_type, data):
-        with self.lock:
-            if task_id in self.clients:
-                event = {
-                    'id': str(uuid.uuid4()),
-                    'event': event_type,
-                    'data': json.dumps(data)
-                }
-                self.clients[task_id].put(event)
+@app.errorhandler(404)
+def page_not_found(e):
+    return redirect(url_for('index'))
 
-sse_manager = SSEManager()
-progress_data = {}
+@app.errorhandler(500)
+def internal_server_error(e):
+    return redirect(url_for('index'))
 
 def allowed_file(filename):
     return '.' in filename and \
@@ -287,10 +132,36 @@ def simple_shorten(description, max_words=8):
     words = re.sub(r'[^\w\s]', '', description).split()[:max_words]
     return ' '.join(words)
 
+def extract_from_info(file_content, filename):
+    """Extract from information from the provided file content."""
+    try:
+        if filename.endswith('.csv'):
+            df = pd.read_csv(StringIO(file_content.decode('utf-8')))
+        else:
+            df = pd.read_excel(BytesIO(file_content))
+        
+        if len(df) > 0:
+            first_row = df.iloc[0]
+            global from_info
+            from_info = {
+                'FromName': safe_value(first_row.get('FromName', '')),
+                'FromCompany': safe_value(first_row.get('FromCompany', '')),
+                'FromStreet': safe_value(first_row.get('FromStreet', '')),
+                'FromStreet2': safe_value(first_row.get('FromStreet2', '')),
+                'FromCity': safe_value(first_row.get('FromCity', '')),
+                'FromState': safe_value(first_row.get('FromState', '')),
+                'FromZip': safe_value(first_row.get('FromZip', '')),
+                'FromPhone': safe_value(first_row.get('FromPhone', ''))
+            }
+            logger.info(f"Successfully extracted 'from' information: {from_info['FromName']}, {from_info['FromCity']}")
+            return True
+    except Exception as e:
+        logger.error(f"Error extracting 'from' information: {str(e)}")
+        return False
+
 def shorten_description(description, task_id, is_retry=False):
     global stop_execution_flag
     
-    # Check if we should stop - quick check first without lock
     if stop_execution_flag:
         with stop_execution_lock:
             if stop_execution_flag:
@@ -301,7 +172,6 @@ def shorten_description(description, task_id, is_retry=False):
         
     try:
         if not is_retry:
-            # Check stop flag again before rate limiting
             if stop_execution_flag:
                 with stop_execution_lock:
                     if stop_execution_flag:
@@ -309,7 +179,6 @@ def shorten_description(description, task_id, is_retry=False):
             
             gemini_limiter.wait()
         
-        # Final check before making API call
         if stop_execution_flag:
             with stop_execution_lock:
                 if stop_execution_flag:
@@ -337,66 +206,11 @@ def shorten_description(description, task_id, is_retry=False):
             
         return shortened
     except Exception as e:
-        # Only log if this wasn't a stop request
         with stop_execution_lock:
             if not stop_execution_flag:
                 logger.error(f"Error shortening description: {str(e)}")
         return None
 
-@app.route('/reset_execution_flag', methods=['POST'])
-def reset_execution_flag():
-    """Endpoint to reset the stop flag (allows new processes to run)"""
-    global stop_execution_flag
-    
-    with stop_execution_lock:
-        stop_execution_flag = False
-        
-    # Clean up any completed threads
-    with threads_lock:
-        for task_id in list(active_threads.keys()):
-            if not active_threads[task_id]['thread'].is_alive():
-                del active_threads[task_id]
-        
-    return jsonify({'success': True, 'message': 'Execution flag reset'})
-
-def process_product(product_data, task_id, is_retry=False):
-    try:
-        if not is_retry:
-            with progress_data[task_id]['lock']:
-                progress_data[task_id]['current'] += 1
-                current = progress_data[task_id]['current']
-                total = progress_data[task_id]['total']
-                progress_data[task_id]['status'] = f"Processing {current}/{total}"
-        
-        if len(product_data.get('description', '')) > 0:
-            short_desc = shorten_description(product_data['description'], task_id, is_retry)
-            
-            if short_desc is None:
-                return None, product_data
-        else:
-            short_desc = "Unknown Product"
-        
-        product_data['short_description'] = f"{short_desc} (Qty: {product_data['qty']})"
-        csv_content = generate_product_csv(product_data)
-        
-        # Use the shorter filename function
-        filename = generate_shorter_filename(product_data)
-        filepath = os.path.join(app.config['PRODUCTS_FOLDER'], filename)
-        
-        with open(filepath, 'w', newline='') as f:
-            f.write(csv_content)
-        
-        return {
-            'product': product_data['short_description'],
-            'filename': filename,
-            'download_url': f'/download/{filename}',
-            'to_info': product_data['to_info']
-        }, None
-    
-    except Exception as e:
-        logger.error(f"Error processing product: {str(e)}")
-        return None, product_data
-    
 def generate_product_csv(product_data):
     headers = [
         'FromName', 'FromCompany', 'FromStreet', 'FromStreet2', 'FromCity', 'FromState', 
@@ -432,21 +246,76 @@ def generate_product_csv(product_data):
     writer.writerow(headers)
     writer.writerow(row)
     
-    return output.getvalue()
+    return output.getvalue().encode('utf-8')
 
-# Update the process_po_file function to store original data
-def process_po_file(filepath, task_id):
+def generate_shorter_filename(product_data):
+    """Generate a shorter, more concise filename for the CSV file."""
+    po_num = product_data['po_number'][-5:] if len(product_data['po_number']) > 5 else product_data['po_number']
+    order_num = product_data['order_number'][-5:] if len(product_data['order_number']) > 5 else product_data['order_number']
+    
+    if 'short_description' in product_data:
+        desc = product_data['short_description']
+        desc = re.sub(r'\s*\(Qty:.*?\)', '', desc)
+        desc = re.sub(r'\s*\(See Details\)', '', desc)
+    else:
+        desc = product_data.get('description', '')
+    
+    words = re.findall(r'\w+', desc)
+    short_desc = ' '.join(words[:3])
+    customer_name = product_data['to_info']['ToName'].split()[0] if product_data['to_info']['ToName'] else 'unknown'
+    
+    clean_text = re.sub(r'[^\w\s]', '', f"{short_desc}_{customer_name}")
+    clean_text = re.sub(r'\s+', '_', clean_text)
+    short_uuid = uuid.uuid4().hex[:6]
+    
+    filename = f"prod_{clean_text}_{short_uuid}.csv"
+    return filename
+
+def process_product(product_data, task_id, is_retry=False):
     try:
-        if filepath.endswith('.csv'):
-            chunksize = 1000
-            df = pd.concat([chunk for chunk in pd.read_csv(filepath, chunksize=chunksize)])
+        if not is_retry:
+            with progress_data[task_id]['lock']:
+                progress_data[task_id]['current'] += 1
+                current = progress_data[task_id]['current']
+                total = progress_data[task_id]['total']
+                progress_data[task_id]['status'] = f"Processing {current}/{total}"
+        
+        if len(product_data.get('description', '')) > 0:
+            short_desc = shorten_description(product_data['description'], task_id, is_retry)
+            
+            if short_desc is None:
+                return None, product_data
         else:
-            df = pd.read_excel(filepath)
+            short_desc = "Unknown Product"
         
-        # Store the original data for consolidation later
+        product_data['short_description'] = f"{short_desc} (Qty: {product_data['qty']})"
+        csv_content = generate_product_csv(product_data)
+        
+        filename = generate_shorter_filename(product_data)
+        
+        # Store in memory instead of writing to file
+        product_data_store[filename] = csv_content
+        
+        return {
+            'product': product_data['short_description'],
+            'filename': filename,
+            'download_url': f'/download/{filename}',
+            'to_info': product_data['to_info']
+        }, None
+    
+    except Exception as e:
+        logger.error(f"Error processing product: {str(e)}")
+        return None, product_data
+
+def process_po_file(file_content, filename, task_id):
+    try:
+        if filename.endswith('.csv'):
+            chunksize = 1000
+            df = pd.concat([chunk for chunk in pd.read_csv(StringIO(file_content.decode('utf-8')), chunksize=chunksize)])
+        else:
+            df = pd.read_excel(BytesIO(file_content))
+        
         original_data = df.to_dict('records')
-        
-        
         records = df.to_dict('records')
         results = []
         
@@ -477,18 +346,14 @@ def process_po_file(filepath, task_id):
                 logger.error(f"Error processing row: {str(e)}")
                 continue
         
-        # Store the original PO data for consolidation
         with progress_data[task_id]['lock']:
             progress_data[task_id]['po_data'] = original_data
-
-            # In your process_po_file function, after storing in progress_data:
 
         return results
         
     except Exception as e:
         logger.error(f"Error processing PO file: {str(e)}")
         return {'error': str(e)}
-
 
 def send_progress_update(task_id):
     if task_id in progress_data:
@@ -510,12 +375,9 @@ def send_progress_update(task_id):
         
         sse_manager.send_event(task_id, 'progress', {'progress': data_copy})
 
-
-
-def background_task(po_url, from_url, task_id):
-    global stop_execution_flag
+def background_task(file_content, filename, task_id):
+    global stop_execution_flag, latest_products
     
-    # Register this thread
     with threads_lock:
         active_threads[task_id] = {
             'thread': threading.current_thread(),
@@ -523,14 +385,6 @@ def background_task(po_url, from_url, task_id):
         }
     
     try:
-        po_file_obj = download_file_from_url(po_url)
-        from_file_obj = download_file_from_url(from_url)
-        # Now use po_file_obj and from_file_obj with pandas
-        if po_url.lower().endswith('.csv'):
-            po_df = pd.read_csv(po_file_obj)
-        else:
-            po_df = pd.read_excel(po_file_obj)
-        # Check if we should stop before starting
         with stop_execution_lock:
             if stop_execution_flag:
                 with progress_data[task_id]['lock']:
@@ -539,7 +393,7 @@ def background_task(po_url, from_url, task_id):
                 send_progress_update(task_id)
                 return
             
-        results = process_po_file(filepath, task_id)
+        results = process_po_file(file_content, filename, task_id)
         if isinstance(results, dict) and 'error' in results:
             with progress_data[task_id]['lock']:
                 progress_data[task_id]['error'] = results['error']
@@ -551,13 +405,11 @@ def background_task(po_url, from_url, task_id):
             progress_data[task_id]['ai_retry'] = []
         send_progress_update(task_id)
         
-        # Process with careful rate limiting
-        max_workers = 4  # Conservative number to avoid rate limits
+        max_workers = 4
         processed_count = 0
         retry_items = []
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # First pass - try all items
             futures = {executor.submit(process_product, product_data, task_id): product_data for product_data in results}
             
             for future in as_completed(futures):
@@ -572,7 +424,6 @@ def background_task(po_url, from_url, task_id):
                 if retry_data:
                     retry_items.append(retry_data)
             
-            # Retry failed items with more conservative approach
             max_retries = 5
             retry_count = 0
             
@@ -580,7 +431,6 @@ def background_task(po_url, from_url, task_id):
                 retry_count += 1
                 logger.info(f"Retry attempt {retry_count} with {len(retry_items)} items")
                 
-                # Process retries one at a time to strictly respect rate limits
                 successful_retries = []
                 new_retries = []
                 
@@ -596,7 +446,6 @@ def background_task(po_url, from_url, task_id):
                     elif new_retry_data:
                         new_retries.append(new_retry_data)
                     
-                    # Small delay between retries
                     time.sleep(0.5)
                 
                 retry_items = new_retries
@@ -604,13 +453,11 @@ def background_task(po_url, from_url, task_id):
                 if not retry_items:
                     break
                 
-                # If we still have retries, wait before next attempt
                 if retry_items and retry_count < max_retries:
-                    wait_time = min(10, 2 ** retry_count)  # Exponential backoff
+                    wait_time = min(10, 2 ** retry_count)
                     logger.info(f"Waiting {wait_time} seconds before next retry")
                     time.sleep(wait_time)
             
-            # Final fallback for any remaining items
             if retry_items:
                 logger.warning(f"Falling back to simple shortening for {len(retry_items)} items")
                 
@@ -622,10 +469,9 @@ def background_task(po_url, from_url, task_id):
                         
                         clean_desc = ''.join(c if c.isalnum() else '_' for c in retry_data['short_description'])[:40]
                         filename = f"product_{retry_data['po_number']}_{retry_data['order_number']}_{clean_desc}_{uuid.uuid4().hex[:8]}.csv"
-                        filepath = os.path.join(app.config['PRODUCTS_FOLDER'], filename)
                         
-                        with open(filepath, 'w', newline='') as f:
-                            f.write(csv_content)
+                        # Store in memory instead of writing to file
+                        product_data_store[filename] = csv_content
                         
                         with progress_data[task_id]['lock']:
                             progress_data[task_id]['products'].append({
@@ -640,7 +486,6 @@ def background_task(po_url, from_url, task_id):
                     except Exception as e:
                         logger.error(f"Error processing fallback product: {str(e)}")
         
-        # Only mark complete if all items processed
         with progress_data[task_id]['lock']:
             if processed_count == progress_data[task_id]['total']:
                 progress_data[task_id]['status'] = 'Completed'
@@ -650,11 +495,9 @@ def background_task(po_url, from_url, task_id):
                 progress_data[task_id]['error'] = 'Could not process all items'
         
         send_progress_update(task_id)
-        global latest_products  # <-- Declare here before assigning
-        latest_products = results  # or however you set it
+        latest_products = results
         
     except Exception as e:
-        # Check if this was a stop request
         with stop_execution_lock:
             if stop_execution_flag:
                 with progress_data[task_id]['lock']:
@@ -666,29 +509,38 @@ def background_task(po_url, from_url, task_id):
         send_progress_update(task_id)
         logger.error(f"Error in background task: {str(e)}")
     finally:
-        # Clean up thread tracking
         with threads_lock:
             if task_id in active_threads:
                 del active_threads[task_id]
-        
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            logger.error(f"Error removing temporary file: {str(e)}")
 
-@app.route('/clean_cloudinary', methods=['POST'])
-def clean_cloudinary():
-    deleted = []
-    errors = []
-    for public_id in list(uploaded_cloudinary_ids):
-        try:
-            cloudinary.uploader.destroy(public_id, resource_type="raw")
-            deleted.append(public_id)
-            uploaded_cloudinary_ids.remove(public_id)
-        except Exception as e:
-            errors.append({'public_id': public_id, 'error': str(e)})
-    return jsonify({'deleted': deleted, 'errors': errors})
-
+def generate_group_csv(product_group, headers):
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    for product_data in product_group:
+        row = [
+            from_info['FromName'], from_info['FromCompany'], from_info['FromStreet'],
+            from_info['FromStreet2'], from_info['FromCity'], from_info['FromState'],
+            from_info['FromZip'], from_info['FromPhone'],
+            product_data['to_info']['ToName'],
+            product_data['to_info']['ToCompany'],
+            product_data['to_info']['ToStreet'],
+            product_data['to_info']['ToStreet2'],
+            product_data['to_info']['ToCity'],
+            product_data['to_info']['ToState'],
+            product_data['to_info']['ToZip'],
+            product_data['to_info']['ToPhone'],
+            product_data['weight'],
+            product_data['length'],
+            product_data['width'],
+            product_data['height'],
+            product_data['short_description'],
+            product_data['order_number'],
+            product_data['po_number'],
+            ''
+        ]
+        writer.writerow(row)
+    return output.getvalue().encode('utf-8')
 
 @app.route('/')
 def index():
@@ -731,70 +583,53 @@ def stream():
         
     return Response(generate(), mimetype='text/event-stream')
 
-def generate_shorter_filename(product_data):
-    """Generate a shorter, more concise filename for the CSV file."""
-    # Extract PO number and order number (use last 5 digits if they're long)
-    po_num = product_data['po_number']
-    order_num = product_data['order_number']
+@app.route('/stop_execution', methods=['POST'])
+def stop_execution():
+    """Endpoint to stop all Gemini API processing"""
+    global stop_execution_flag
     
-    # Get a clean, short version of the product description
-    if 'short_description' in product_data:
-        desc = product_data['short_description']
-        # Remove (Qty: X) and (See Details) from description for filename
-        desc = re.sub(r'\s*\(Qty:.*?\)', '', desc)
-        desc = re.sub(r'\s*\(See Details\)', '', desc)
-    else:
-        desc = product_data.get('description', '')
+    with stop_execution_lock:
+        stop_execution_flag = True
+        
+    with threads_lock:
+        for task_id, thread_info in list(active_threads.items()):
+            if thread_info['thread'].is_alive():
+                with progress_data[task_id]['lock']:
+                    progress_data[task_id]['error'] = 'Processing stopped by user'
+                    progress_data[task_id]['status'] = 'Cancelled'
+                
+                with sse_manager.lock:
+                    sse_manager.send_event(task_id, 'stop', {'message': 'Execution stopped by user'})
     
-    # Limit description to 3-4 words max for shorter filename
-    words = re.findall(r'\w+', desc)
-    short_desc = ' '.join(words[:3])
-    
-    # Get customer name (just first part)
-    customer_name = product_data['to_info']['ToName'].split()[0] if product_data['to_info']['ToName'] else 'unknown'
-    
-    # Clean up special characters
-    clean_text = re.sub(r'[^\w\s]', '', f"{short_desc}_{customer_name}")
-    clean_text = re.sub(r'\s+', '_', clean_text)
-    
-    # Create unique but short identifier
-    short_uuid = uuid.uuid4().hex[:6]
-    
-    # Build the filename (limited to reasonable length)
-    filename = f"prod_{clean_text}_{short_uuid}.csv"
-    
-    return filename
+    return jsonify({'success': True, 'message': 'Stopping all execution'})
 
-def cleanup_existing_files():
-    """Clean up all existing files in the products folder."""
-    try:
-        folder = app.config['PRODUCTS_FOLDER']
-        count = 0
-        if os.path.exists(folder):
-            for filename in os.listdir(folder):
-                file_path = os.path.join(folder, filename)
-                if os.path.isfile(file_path):
-                    os.unlink(file_path)
-                    count += 1
-        logger.info(f"Cleaned up {count} existing files before starting new process")
-        return count
-    except Exception as e:
-        logger.error(f"Error cleaning up existing files: {str(e)}")
-        return 0
+@app.route('/reset_execution_flag', methods=['POST'])
+def reset_execution_flag():
+    global stop_execution_flag
+    with stop_execution_lock:
+        stop_execution_flag = False
+    # Clean up finished threads
+    with threads_lock:
+        for task_id in list(active_threads.keys()):
+            if not active_threads[task_id]['thread'].is_alive():
+                del active_threads[task_id]
+    return jsonify({'success': True, 'message': 'Execution flag reset'})
 
-# Add this new route to your Flask app
+
+def update_gemini_api_key(new_key):
+    global current_api_key, model
+    current_api_key = new_key
+    genai.configure(api_key=new_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')  # Re-create with new config
+
 @app.route('/update_api_key', methods=['POST'])
 def update_api_key():
     try:
         data = request.get_json()
         new_key = data.get('api_key', '').strip()
-        
         if not new_key:
             return jsonify({'error': 'API key cannot be empty'}), 400
-            
-        # Update the global API key configuration
-        genai.configure(api_key=new_key)
-        
+        update_gemini_api_key(new_key)
         return jsonify({'success': True, 'message': 'API key updated successfully'})
     except Exception as e:
         logger.error(f"Error updating API key: {str(e)}")
@@ -802,10 +637,9 @@ def update_api_key():
     
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    # Clean up existing files first
-    cleanup_existing_files()
+    global product_data_store
+    product_data_store = {}  # Clear previous data
 
-    # Get API key from form if provided
     user_api_key = request.form.get('gemini_api_key', '').strip()
     if user_api_key:
         try:
@@ -815,7 +649,6 @@ def upload_file():
             logger.error(f"Error configuring with user API key: {str(e)}")
             return jsonify({'error': 'Invalid API key provided'}), 400
     
-    # Check for PO file
     if 'po_file' not in request.files:
         return jsonify({'error': 'No PO file provided'}), 400
     
@@ -827,7 +660,6 @@ def upload_file():
     if not allowed_file(po_file.filename):
         return jsonify({'error': 'PO file type not allowed'}), 400
     
-    # Check for From file
     if 'from_file' not in request.files:
         return jsonify({'error': 'No From information file provided'}), 400
     
@@ -839,38 +671,15 @@ def upload_file():
     if not allowed_file(from_file.filename):
         return jsonify({'error': 'From file type not allowed'}), 400
     
-    # Create directories if they don't exist
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    os.makedirs(app.config['PRODUCTS_FOLDER'], exist_ok=True)
-    
-    # Save From file and extract information
-    from_filename = secure_filename(from_file.filename)
-    from_filepath = os.path.join(app.config['UPLOAD_FOLDER'], from_filename)
-    from_file.save(from_filepath)
-    
-    # Extract from information
-    if not extract_from_info(from_filepath):
-        try:
-            os.remove(from_filepath)
-        except Exception as e:
-            logger.error(f"Error removing from file: {str(e)}")
+    # Read file contents into memory
+    from_file_content = from_file.read()
+    if not extract_from_info(from_file_content, from_file.filename):
         return jsonify({'error': 'Failed to extract from information'}), 400
     
-    # Clean up from file
-    try:
-        os.remove(from_filepath)
-    except Exception as e:
-        logger.error(f"Error removing from file: {str(e)}")
+    po_file_content = po_file.read()
     
-    # Save PO file
-    po_url, po_id = upload_file_to_cloudinary(po_file)
-    from_url, from_id = upload_file_to_cloudinary(from_file)
-
-    # Store Cloudinary URLs in progress_data or session as needed
     task_id = str(uuid.uuid4())
     progress_data[task_id] = {
-        'po_url': po_url,
-        'from_url': from_url,
         'current': 0,
         'total': 0,
         'status': 'Starting...',
@@ -882,9 +691,9 @@ def upload_file():
         'ai_lock': threading.Lock()
     }
     
-    threading.Thread(target=background_task, args=(po_url, from_url, task_id), daemon=True).start()
-
-    return jsonify({'task_id': task_id}), 202    
+    threading.Thread(target=background_task, args=(po_file_content, po_file.filename, task_id), daemon=True).start()
+    
+    return jsonify({'task_id': task_id}), 202
 
 @app.route('/progress/<task_id>')
 def progress(task_id):
@@ -897,44 +706,28 @@ def progress(task_id):
     
     return jsonify(data_copy)
 
-import zipfile
-import io
-
 @app.route('/download-all/<task_id>', methods=['GET'])
 def download_all_files(task_id):
-    """Create a zip file with all generated files for a task and send it."""
     if task_id not in progress_data:
         return jsonify({'error': 'Task not found'}), 404
         
     try:
-        # Create an in-memory zip file
-        memory_file = io.BytesIO()
+        memory_zip = BytesIO()
         
-        with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-            # Get all product files for this task
+        with zipfile.ZipFile(memory_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
             with progress_data[task_id]['lock']:
                 products = progress_data[task_id]['products'].copy()
             
-            # Add each file to the zip
             for product in products:
-                filepath = os.path.join(app.config['PRODUCTS_FOLDER'], product['filename'])
-                if os.path.exists(filepath):
-                    # Read the file content
-                    with open(filepath, 'r') as f:
-                        file_content = f.read()
-                    
-                    # Add to zip with the same filename
-                    zf.writestr(product['filename'], file_content)
+                if product['filename'] in product_data_store:
+                    zf.writestr(product['filename'], product_data_store[product['filename']])
         
-        # Prepare response
-        memory_file.seek(0)
-        
-        # Generate a filename for the zip based on timestamp
+        memory_zip.seek(0)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         zip_filename = f"shipping_files_{timestamp}.zip"
         
         return send_file(
-            memory_file,
+            memory_zip,
             mimetype='application/zip',
             as_attachment=True,
             download_name=zip_filename
@@ -944,22 +737,10 @@ def download_all_files(task_id):
         logger.error(f"Error creating zip file: {str(e)}")
         return jsonify({'error': 'Failed to create zip file'}), 500
     
-@app.route('/download/<filename>', methods=['GET'])
-def download_file(filename):
-    filepath = os.path.join(app.config['PRODUCTS_FOLDER'], filename)
-    if os.path.exists(filepath):
-        return send_file(
-            filepath,
-            as_attachment=True,
-            mimetype='text/csv',
-            download_name=filename
-        )
-    return jsonify({'error': 'File not found'}), 404
-
 @app.route('/download_main_products_csv')
 def download_main_products_csv():
+    global latest_products, from_info
     try:
-        global latest_products, from_info
         if not latest_products:
             return jsonify({'error': 'No product data available. Please upload and process a PO file first.'}), 404
 
@@ -973,63 +754,104 @@ def download_main_products_csv():
         output = StringIO()
         writer = csv.writer(output)
         writer.writerow(headers)
-
-        for product_data in latest_products:
+        
+        for product in latest_products:
             row = [
-                from_info.get('FromName', ''),
-                from_info.get('FromCompany', ''),
-                from_info.get('FromStreet', ''),
-                from_info.get('FromStreet2', ''),
-                from_info.get('FromCity', ''),
-                from_info.get('FromState', ''),
-                from_info.get('FromZip', ''),
-                from_info.get('FromPhone', ''),
-                product_data['to_info'].get('ToName', ''),
-                product_data['to_info'].get('ToCompany', ''),
-                product_data['to_info'].get('ToStreet', ''),
-                product_data['to_info'].get('ToStreet2', ''),
-                product_data['to_info'].get('ToCity', ''),
-                product_data['to_info'].get('ToState', ''),
-                product_data['to_info'].get('ToZip', ''),
-                product_data['to_info'].get('ToPhone', ''),
-                product_data.get('weight', ''),
-                product_data.get('length', ''),
-                product_data.get('width', ''),
-                product_data.get('height', ''),
-                product_data.get('short_description', ''),  # Use shortened description
-                product_data.get('order_number', ''),
-                product_data.get('po_number', ''),
-                ''  # Signature empty
+                from_info['FromName'], from_info['FromCompany'], from_info['FromStreet'],
+                from_info['FromStreet2'], from_info['FromCity'], from_info['FromState'],
+                from_info['FromZip'], from_info['FromPhone'],
+                product['to_info']['ToName'],
+                product['to_info']['ToCompany'],
+                product['to_info']['ToStreet'],
+                product['to_info']['ToStreet2'],
+                product['to_info']['ToCity'],
+                product['to_info']['ToState'],
+                product['to_info']['ToZip'],
+                product['to_info']['ToPhone'],
+                product['weight'],
+                product['length'],
+                product['width'],
+                product['height'],
+                product['short_description'],
+                product['order_number'],
+                product['po_number'],
+                ''
             ]
             writer.writerow(row)
 
         output.seek(0)
-
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
         return send_file(
-            output,
+            BytesIO(output.getvalue().encode('utf-8')),
             mimetype='text/csv',
             as_attachment=True,
-            download_name='all_products.csv'
+            download_name=f'all_products_{timestamp}.csv'
         )
     except Exception as e:
         logger.error(f"Error creating main products CSV: {str(e)}")
-        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download_unique_products_zip')
+def download_unique_products_zip():
+    global latest_products, from_info
+    try:
+        if not latest_products:
+            return jsonify({'error': 'No product data available. Please upload and process a PO file first.'}), 404
+
+        from collections import defaultdict
+        product_groups = defaultdict(list)
+        for product in latest_products:
+            desc = product.get('description') or product.get('product') or 'Unknown Product'
+            product_groups[desc].append(product)
+
+        headers = [
+            'FromName', 'FromCompany', 'FromStreet', 'FromStreet2', 'FromCity', 'FromState',
+            'FromZip', 'FromPhone', 'ToName', 'ToCompany', 'ToStreet', 'ToStreet2',
+            'ToCity', 'ToState', 'ToZip', 'ToPhone', 'Weight', 'Length', 'Width',
+            'Height', 'Description', 'order num', 'Reference2', 'Signature'
+        ]
+
+        memory_zip = BytesIO()
+        with zipfile.ZipFile(memory_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for desc, group in product_groups.items():
+                safe_desc = re.sub(r'[^\w\s-]', '', str(desc))[:50].strip().replace(' ', '_')
+                filename = f"{safe_desc or 'Unknown_Product'}.csv"
+                csv_content = generate_group_csv(group, headers)
+                zf.writestr(filename, csv_content)
+
+        memory_zip.seek(0)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        return send_file(
+            memory_zip,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'unique_products_{timestamp}.zip'
+        )
+    except Exception as e:
+        logger.error(f"Error creating ZIP for unique products: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    if filename in product_data_store:
+        return send_file(
+            BytesIO(product_data_store[filename]),
+            as_attachment=True,
+            mimetype='text/csv',
+            download_name=filename
+        )
+    return jsonify({'error': 'File not found'}), 404
 
 @app.route('/cleanup', methods=['POST'])
 def cleanup_files():
     try:
-        count = 0
-        for filename in os.listdir(app.config['PRODUCTS_FOLDER']):
-            file_path = os.path.join(app.config['PRODUCTS_FOLDER'], filename)
-            if os.path.isfile(file_path):
-                os.unlink(file_path)
-                count += 1
+        global product_data_store
+        count = len(product_data_store)
+        product_data_store = {}
         return jsonify({'success': True, 'count': count})
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    os.makedirs(app.config['PRODUCTS_FOLDER'], exist_ok=True)
     app.run(debug=True, threaded=True)
