@@ -465,7 +465,7 @@ document.getElementById('downloadAllBtn').addEventListener('click', function(e) 
         
         // Create a temporary anchor element for the download
         const link = document.createElement('a');
-        link.href = `https://web-production-0cee.up/download-all`;
+        link.href = `http://localhost:5000/download-all}`;
         link.style.display = 'none';
         document.body.appendChild(link);
         
@@ -514,7 +514,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
             // Disable process button immediately
             document.getElementById('processBtn').disabled = true;
             
-            fetch('https://web-production-0cee.up/stop_execution', {
+            fetch('http://localhost:5000/stop_execution', {
                 method: 'POST'
             })
             .then(response => response.json())
@@ -553,7 +553,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
             btn.disabled = true;
             btn.textContent = 'Resetting...';
             
-            fetch('https://web-production-0cee.up/reset_execution_flag', {
+            fetch('http://localhost:5000/reset_execution_flag', {
                 method: 'POST'
             })
             .then(response => response.json())
@@ -591,7 +591,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
                 return;
             }
             
-            fetch('https://web-production-0cee.up/update_api_key', {
+            fetch('http://localhost:5000/update_api_key', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -654,7 +654,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
             processBtn.disabled = true;
             processBtn.textContent = 'Processing...';
             
-            fetch('https://web-production-0cee.up/upload', {
+            fetch('http://localhost:5000/upload', {
                 method: 'POST',
                 body: formData,
             })
@@ -683,7 +683,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
             }
             
             // Connect to the SSE endpoint
-            eventSource = new EventSource(`https://web-production-0cee.up/stream?channel=${taskId}`);
+            eventSource = new EventSource(`http://localhost:5000/stream?channel=${taskId}`);
             
             // Listen for progress events
             eventSource.addEventListener('progress', function(e) {
@@ -710,7 +710,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
         // Fallback to polling if SSE fails
         function checkProgressManually(taskId) {
             const intervalId = setInterval(() => {
-                fetch(`https://web-production-0cee.up/progress/${taskId}`)
+                fetch(`http://localhost:5000/progress/${taskId}`)
                     .then(response => response.json())
                     .then(progress => {
                         updateProgressUI(progress);
@@ -830,7 +830,7 @@ document.querySelector('a[href="/download_main_products_csv"]').addEventListener
                 cleanupBtn.textContent = 'Cleaning...';
                 cleanupBtn.disabled = true;
                 
-                const response = await fetch('https://web-production-0cee.up/cleanup', {
+                const response = await fetch('http://localhost:5000/cleanup', {
                     method: 'POST'
                 });
                 
