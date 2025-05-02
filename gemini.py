@@ -6,6 +6,7 @@ import uuid
 import csv
 from io import BytesIO, StringIO
 import numpy as np
+import google.generativeai as genai
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import threading
@@ -27,6 +28,10 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
 from flask_cors import CORS
 CORS(app)
 
+# Configure Gemini API
+API_KEY = 'AIzaSyBFBenEhzVsRRSeG0xfCfibz-Jn2EsJjNI'
+genai.configure(api_key=API_KEY)
+model = genai.GenerativeModel('gemini-2.0-flash')
 global from_info
 
 # Global variables for execution control
@@ -66,6 +71,46 @@ class SSEManager:
 sse_manager = SSEManager()
 progress_data = {}
 
+class StrictRateLimiter:
+    def __init__(self, rate_per_minute=60):
+        self.rate = rate_per_minute
+        self.interval = 60.0 / rate_per_minute
+        self.last_request_time = 0
+        self.lock = threading.Lock()
+        self.request_count = 0
+        self.reset_time = time.time() + 60
+        self.emergency_buffer = 5  # Keep 5 requests as buffer
+        
+    def wait(self):
+        with self.lock:
+            current_time = time.time()
+            
+            # Reset counter if minute has passed
+            if current_time > self.reset_time:
+                self.request_count = 0
+                self.reset_time = current_time + 60
+            
+            # If we're approaching the limit, wait until next reset
+            if self.request_count >= (self.rate - self.emergency_buffer):
+                sleep_time = self.reset_time - current_time
+                if sleep_time > 0:
+                    logger.warning(f"Approaching rate limit. Sleeping for {sleep_time:.2f} seconds")
+                    time.sleep(sleep_time)
+                self.request_count = 0
+                self.reset_time = time.time() + 60
+            
+            # Enforce interval between requests
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.interval:
+                sleep_time = self.interval - time_since_last
+                time.sleep(sleep_time)
+            
+            self.last_request_time = current_time
+            self.request_count += 1
+            return current_time
+
+gemini_limiter = StrictRateLimiter(rate_per_minute=60)
+
 @app.errorhandler(404)
 def page_not_found(e):
     return redirect(url_for('index'))
@@ -82,6 +127,10 @@ def safe_value(value):
     if pd.isna(value) or value is None or (isinstance(value, float) and np.isnan(value)):
         return ''
     return str(value)
+
+def simple_shorten(description, max_words=8):
+    words = re.sub(r'[^\w\s]', '', description).split()[:max_words]
+    return ' '.join(words)
 
 def extract_from_info(file_content, filename):
     """Extract from information from the provided file content."""
@@ -110,6 +159,58 @@ def extract_from_info(file_content, filename):
         logger.error(f"Error extracting 'from' information: {str(e)}")
         return False
 
+def shorten_description(description, task_id, is_retry=False):
+    global stop_execution_flag
+    
+    if stop_execution_flag:
+        with stop_execution_lock:
+            if stop_execution_flag:
+                raise Exception("Processing stopped by user")
+    
+    if len(description) <= 30:
+        return description
+        
+    try:
+        if not is_retry:
+            if stop_execution_flag:
+                with stop_execution_lock:
+                    if stop_execution_flag:
+                        raise Exception("Processing stopped by user")
+            
+            gemini_limiter.wait()
+        
+        if stop_execution_flag:
+            with stop_execution_lock:
+                if stop_execution_flag:
+                    raise Exception("Processing stopped by user")
+
+        prompt = (
+            "You are a product description summarizer. "
+            "Given the full product description below, generate a **single concise summary** "
+            "in 5 to 10 words that captures all key product identifiers, such as brand, scent, size, and type. "
+            "Do NOT provide multiple options, lists, or explanations. "
+            "Do NOT start with phrases like 'Here are a few options'. "
+            "Do NOT use bullet points or numbering. "
+            "Return only the concise summary, nothing else.\n\n"
+            f"Product description: {description}"
+        )
+
+        response = model.generate_content(prompt)
+        shortened = response.text.strip('"\'')
+        
+        if not shortened or len(shortened) < 3:
+            raise Exception("Empty response from AI")
+            
+        with progress_data[task_id]['ai_lock']:
+            progress_data[task_id]['ai_success'] += 1
+            
+        return shortened
+    except Exception as e:
+        with stop_execution_lock:
+            if not stop_execution_flag:
+                logger.error(f"Error shortening description: {str(e)}")
+        return None
+
 def generate_product_csv(product_data):
     headers = [
         'FromName', 'FromCompany', 'FromStreet', 'FromStreet2', 'FromCity', 'FromState', 
@@ -134,7 +235,7 @@ def generate_product_csv(product_data):
         product_data['length'],
         product_data['width'],
         product_data['height'],
-        f"{product_data['description']} (Qty: {product_data['qty']})",
+        product_data['short_description'],
         product_data['order_number'],
         product_data['po_number'],
         ''
@@ -152,7 +253,13 @@ def generate_shorter_filename(product_data):
     po_num = product_data['po_number'][-5:] if len(product_data['po_number']) > 5 else product_data['po_number']
     order_num = product_data['order_number'][-5:] if len(product_data['order_number']) > 5 else product_data['order_number']
     
-    desc = product_data.get('description', '')
+    if 'short_description' in product_data:
+        desc = product_data['short_description']
+        desc = re.sub(r'\s*\(Qty:.*?\)', '', desc)
+        desc = re.sub(r'\s*\(See Details\)', '', desc)
+    else:
+        desc = product_data.get('description', '')
+    
     words = re.findall(r'\w+', desc)
     short_desc = ' '.join(words[:3])
     customer_name = product_data['to_info']['ToName'].split()[0] if product_data['to_info']['ToName'] else 'unknown'
@@ -164,22 +271,33 @@ def generate_shorter_filename(product_data):
     filename = f"prod_{clean_text}_{short_uuid}.csv"
     return filename
 
-def process_product(product_data, task_id):
+def process_product(product_data, task_id, is_retry=False):
     try:
-        with progress_data[task_id]['lock']:
-            progress_data[task_id]['current'] += 1
-            current = progress_data[task_id]['current']
-            total = progress_data[task_id]['total']
-            progress_data[task_id]['status'] = f"Processing {current}/{total}"
+        if not is_retry:
+            with progress_data[task_id]['lock']:
+                progress_data[task_id]['current'] += 1
+                current = progress_data[task_id]['current']
+                total = progress_data[task_id]['total']
+                progress_data[task_id]['status'] = f"Processing {current}/{total}"
         
+        if len(product_data.get('description', '')) > 0:
+            short_desc = shorten_description(product_data['description'], task_id, is_retry)
+            
+            if short_desc is None:
+                return None, product_data
+        else:
+            short_desc = "Unknown Product"
+        
+        product_data['short_description'] = f"{short_desc} (Qty: {product_data['qty']})"
         csv_content = generate_product_csv(product_data)
+        
         filename = generate_shorter_filename(product_data)
         
         # Store in memory instead of writing to file
         product_data_store[filename] = csv_content
         
         return {
-            'product': f"{product_data['description']} (Qty: {product_data['qty']})",
+            'product': product_data['short_description'],
             'filename': filename,
             'download_url': f'/download/{filename}',
             'to_info': product_data['to_info']
@@ -244,7 +362,10 @@ def send_progress_update(task_id):
                 'current': progress_data[task_id]['current'],
                 'total': progress_data[task_id]['total'],
                 'status': progress_data[task_id]['status'],
-                'products': progress_data[task_id]['products'].copy()
+                'products': progress_data[task_id]['products'].copy(),
+                'ai_success': progress_data[task_id]['ai_success'],
+                'ai_failed': progress_data[task_id]['ai_failed'],
+                'ai_pending': len(progress_data[task_id]['ai_retry'])
             }
             
             if progress_data[task_id].get('success'):
@@ -281,22 +402,89 @@ def background_task(file_content, filename, task_id):
         
         with progress_data[task_id]['lock']:
             progress_data[task_id]['total'] = len(results)
+            progress_data[task_id]['ai_retry'] = []
         send_progress_update(task_id)
         
         max_workers = 4
         processed_count = 0
+        retry_items = []
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_product, product_data, task_id): product_data for product_data in results}
             
             for future in as_completed(futures):
-                product_result, _ = future.result()
+                product_result, retry_data = future.result()
                 
                 if product_result:
                     with progress_data[task_id]['lock']:
                         progress_data[task_id]['products'].append(product_result)
                     processed_count += 1
                     send_progress_update(task_id)
+                
+                if retry_data:
+                    retry_items.append(retry_data)
+            
+            max_retries = 100
+            retry_count = 0
+            
+            while retry_items and retry_count < max_retries:
+                retry_count += 1
+                logger.info(f"Retry attempt {retry_count} with {len(retry_items)} items")
+                
+                successful_retries = []
+                new_retries = []
+                
+                for retry_data in retry_items:
+                    product_result, new_retry_data = process_product(retry_data, task_id, is_retry=True)
+                    
+                    if product_result:
+                        with progress_data[task_id]['lock']:
+                            progress_data[task_id]['products'].append(product_result)
+                        successful_retries.append(retry_data)
+                        processed_count += 1
+                        send_progress_update(task_id)
+                    elif new_retry_data:
+                        new_retries.append(new_retry_data)
+                    
+                    time.sleep(0.5)
+                
+                retry_items = new_retries
+                
+                if not retry_items:
+                    break
+                
+                if retry_items and retry_count < max_retries:
+                    wait_time = min(10, 2 ** retry_count)
+                    logger.info(f"Waiting {wait_time} seconds before next retry")
+                    time.sleep(wait_time)
+            
+            if retry_items:
+                logger.warning(f"Falling back to simple shortening for {len(retry_items)} items")
+                
+                for retry_data in retry_items:
+                    try:
+                        short_desc = simple_shorten(retry_data['description'])
+                        retry_data['short_description'] = f"{short_desc} (Qty: {retry_data['qty']})"
+                        csv_content = generate_product_csv(retry_data)
+                        
+                        clean_desc = ''.join(c if c.isalnum() else '_' for c in retry_data['short_description'])[:40]
+                        filename = f"product_{retry_data['po_number']}_{retry_data['order_number']}_{clean_desc}_{uuid.uuid4().hex[:8]}.csv"
+                        
+                        # Store in memory instead of writing to file
+                        product_data_store[filename] = csv_content
+                        
+                        with progress_data[task_id]['lock']:
+                            progress_data[task_id]['products'].append({
+                                'product': retry_data['short_description'],
+                                'filename': filename,
+                                'download_url': f'/download/{filename}',
+                                'to_info': retry_data['to_info']
+                            })
+                            progress_data[task_id]['ai_failed'] += 1
+                        
+                        send_progress_update(task_id)
+                    except Exception as e:
+                        logger.error(f"Error processing fallback product: {str(e)}")
         
         with progress_data[task_id]['lock']:
             if processed_count == progress_data[task_id]['total']:
@@ -346,7 +534,7 @@ def generate_group_csv(product_group, headers):
             product_data['length'],
             product_data['width'],
             product_data['height'],
-            f"{product_data['description']} (Qty: {product_data['qty']})",
+            product_data['short_description'],
             product_data['order_number'],
             product_data['po_number'],
             ''
@@ -397,7 +585,7 @@ def stream():
 
 @app.route('/stop_execution', methods=['POST'])
 def stop_execution():
-    """Endpoint to stop all processing"""
+    """Endpoint to stop all Gemini API processing"""
     global stop_execution_flag
     
     with stop_execution_lock:
@@ -427,11 +615,40 @@ def reset_execution_flag():
                 del active_threads[task_id]
     return jsonify({'success': True, 'message': 'Execution flag reset'})
 
+
+def update_gemini_api_key(new_key):
+    global current_api_key, model
+    current_api_key = new_key
+    genai.configure(api_key=new_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')  # Re-create with new config
+
+@app.route('/update_api_key', methods=['POST'])
+def update_api_key():
+    try:
+        data = request.get_json()
+        new_key = data.get('api_key', '').strip()
+        if not new_key:
+            return jsonify({'error': 'API key cannot be empty'}), 400
+        update_gemini_api_key(new_key)
+        return jsonify({'success': True, 'message': 'API key updated successfully'})
+    except Exception as e:
+        logger.error(f"Error updating API key: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    
 @app.route('/upload', methods=['POST'])
 def upload_file():
     global product_data_store
     product_data_store = {}  # Clear previous data
 
+    user_api_key = request.form.get('gemini_api_key', '').strip()
+    if user_api_key:
+        try:
+            genai.configure(api_key=user_api_key)
+            logger.info("Using user-provided API key")
+        except Exception as e:
+            logger.error(f"Error configuring with user API key: {str(e)}")
+            return jsonify({'error': 'Invalid API key provided'}), 400
+    
     if 'po_file' not in request.files:
         return jsonify({'error': 'No PO file provided'}), 400
     
@@ -467,7 +684,11 @@ def upload_file():
         'total': 0,
         'status': 'Starting...',
         'products': [],
-        'lock': threading.Lock()
+        'ai_success': 0,
+        'ai_failed': 0,
+        'ai_retry': [],
+        'lock': threading.Lock(),
+        'ai_lock': threading.Lock()
     }
     
     threading.Thread(target=background_task, args=(po_file_content, po_file.filename, task_id), daemon=True).start()
@@ -480,37 +701,37 @@ def progress(task_id):
         return jsonify({'error': 'Task not found'}), 404
         
     with progress_data[task_id]['lock']:
-        data_copy = {k: v for k, v in progress_data[task_id].items() if k != 'lock'}
+        data_copy = {k: v for k, v in progress_data[task_id].items() if k not in ['lock', 'ai_lock', 'ai_retry']}
+        data_copy['ai_pending'] = len(progress_data[task_id]['ai_retry'])
     
     return jsonify(data_copy)
 
-
-@app.route('/download-all', methods=['GET'])
-def download_all_files():
+@app.route('/download-all/<task_id>', methods=['GET'])
+def download_all_files(task_id):
+    if task_id not in progress_data:
+        return jsonify({'error': 'Task not found'}), 404
+        
     try:
         memory_zip = BytesIO()
         
         with zipfile.ZipFile(memory_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for filename, content in product_data_store.items():
-                zf.writestr(filename, content)
+            with progress_data[task_id]['lock']:
+                products = progress_data[task_id]['products'].copy()
+            
+            for product in products:
+                if product['filename'] in product_data_store:
+                    zf.writestr(product['filename'], product_data_store[product['filename']])
         
         memory_zip.seek(0)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         zip_filename = f"shipping_files_{timestamp}.zip"
         
-        response = send_file(
+        return send_file(
             memory_zip,
             mimetype='application/zip',
             as_attachment=True,
             download_name=zip_filename
         )
-        
-        # Add headers to prevent caching
-        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
-        
-        return response
     
     except Exception as e:
         logger.error(f"Error creating zip file: {str(e)}")
@@ -551,7 +772,7 @@ def download_main_products_csv():
                 product['length'],
                 product['width'],
                 product['height'],
-                f"{product['description']} (Qty: {product['qty']})",
+                product['short_description'],
                 product['order_number'],
                 product['po_number'],
                 ''
